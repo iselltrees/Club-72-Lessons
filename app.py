@@ -1,8 +1,17 @@
 from flask import Flask, request, jsonify, render_template_string
-import sqlite3, json, datetime, os
+import sqlite3, datetime, os, smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 app = Flask(__name__)
+
+# /tmp is always writable on Railway
 DB = os.environ.get('DB_PATH', '/tmp/bookings.db')
+
+# Email config — set these as Railway environment variables
+GMAIL_USER     = os.environ.get('GMAIL_USER', '')
+GMAIL_PASSWORD = os.environ.get('GMAIL_APP_PASSWORD', '')
+NOTIFY_EMAIL   = os.environ.get('NOTIFY_EMAIL', 'Nate@club72golfco.com')
 
 def init_db():
     conn = sqlite3.connect(DB)
@@ -14,9 +23,98 @@ def init_db():
         skill TEXT, notes TEXT,
         created_at TEXT
     )''')
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
 
 init_db()
+
+# ── Email helpers ─────────────────────────────────────────────────
+def send_email(to, subject, html_body):
+    if not GMAIL_USER or not GMAIL_PASSWORD:
+        print("WARNING: Email not configured — set GMAIL_USER and GMAIL_APP_PASSWORD in Railway variables")
+        return False
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From']    = f'Club 72 Golf Co. <{GMAIL_USER}>'
+        msg['To']      = to
+        msg.attach(MIMEText(html_body, 'html'))
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(GMAIL_USER, GMAIL_PASSWORD)
+            server.sendmail(GMAIL_USER, to, msg.as_string())
+        print(f"Email sent to {to}")
+        return True
+    except Exception as e:
+        print(f"Email failed: {e}")
+        return False
+
+def notify_nathan(d, booking_id):
+    subject = f"New Booking #{booking_id} — {d['name']} ({d['package']})"
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+      <div style="background:#1a3a2a;padding:24px 32px;border-radius:8px 8px 0 0;">
+        <h1 style="color:#b8963e;margin:0;font-size:22px;">New Lesson Booking</h1>
+        <p style="color:#aaa;margin:6px 0 0;">Club 72 Golf Co. — Booking #{booking_id}</p>
+      </div>
+      <div style="background:#f8f3e8;padding:24px 32px;border-radius:0 0 8px 8px;border:1px solid #e8e0cc;">
+        <table style="width:100%;border-collapse:collapse;font-size:15px;">
+          <tr><td style="padding:8px 0;color:#7a7a6e;width:140px;">Student</td><td style="padding:8px 0;font-weight:600;color:#1a1a1a;">{d['name']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Email</td><td style="padding:8px 0;color:#1a1a1a;">{d['email']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Phone</td><td style="padding:8px 0;color:#1a1a1a;">{d['phone']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Package</td><td style="padding:8px 0;color:#1a1a1a;">{d['package']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Date</td><td style="padding:8px 0;color:#1a1a1a;">{d['date']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Time</td><td style="padding:8px 0;color:#1a1a1a;">{d['time']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Location</td><td style="padding:8px 0;color:#1a1a1a;">{d['location']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Skill level</td><td style="padding:8px 0;color:#1a1a1a;">{d['skill']}</td></tr>
+          {"<tr style='border-top:1px solid #e8e0cc;'><td style='padding:8px 0;color:#7a7a6e;'>Notes</td><td style='padding:8px 0;color:#1a1a1a;'>" + str(d.get('notes','')) + "</td></tr>" if d.get('notes') else ""}
+          <tr style="border-top:2px solid #b8963e;"><td style="padding:12px 0;color:#1a3a2a;font-weight:700;font-size:16px;">Total</td><td style="padding:12px 0;color:#1a3a2a;font-weight:700;font-size:16px;">${d['price']}</td></tr>
+        </table>
+        <div style="margin-top:20px;padding:14px 18px;background:#e8f4ec;border-radius:6px;border:1px solid #c8dece;">
+          <p style="margin:0;color:#2d5a3d;font-size:14px;">
+            Reply to <strong>{d['email']}</strong> or call <strong>{d['phone']}</strong> to confirm.
+          </p>
+        </div>
+        <p style="margin:16px 0 0;font-size:13px;color:#999;">
+          View all bookings: <a href="https://web-production-330b5.up.railway.app/bookings" style="color:#b8963e;">Admin dashboard</a>
+        </p>
+      </div>
+    </div>"""
+    send_email(NOTIFY_EMAIL, subject, html)
+
+def confirm_student(d, booking_id):
+    subject = f"Your lesson with Nathan Ross — {d['date']} at {d['time']}"
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+      <div style="background:#1a3a2a;padding:24px 32px;border-radius:8px 8px 0 0;">
+        <h1 style="color:#b8963e;margin:0;font-size:22px;">Booking Confirmed</h1>
+        <p style="color:#aaa;margin:6px 0 0;">Club 72 Golf Co. — Nathan Ross, Golf Instructor</p>
+      </div>
+      <div style="background:#f8f3e8;padding:24px 32px;border-radius:0 0 8px 8px;border:1px solid #e8e0cc;">
+        <p style="font-size:16px;color:#1a1a1a;margin:0 0 20px;">Hi {d['name'].split()[0]}, your booking has been received!</p>
+        <table style="width:100%;border-collapse:collapse;font-size:15px;">
+          <tr><td style="padding:8px 0;color:#7a7a6e;width:120px;">Package</td><td style="padding:8px 0;font-weight:600;color:#1a1a1a;">{d['package']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Date</td><td style="padding:8px 0;color:#1a1a1a;">{d['date']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Time</td><td style="padding:8px 0;color:#1a1a1a;">{d['time']}</td></tr>
+          <tr style="border-top:1px solid #e8e0cc;"><td style="padding:8px 0;color:#7a7a6e;">Location</td><td style="padding:8px 0;color:#1a1a1a;">{d['location']}</td></tr>
+          <tr style="border-top:2px solid #b8963e;"><td style="padding:12px 0;color:#1a3a2a;font-weight:700;">Total</td><td style="padding:12px 0;color:#1a3a2a;font-weight:700;">${d['price']}</td></tr>
+        </table>
+        <div style="margin-top:20px;padding:14px 18px;background:#fff8e8;border-radius:6px;border:1px solid #f0d898;">
+          <p style="margin:0;color:#7a5a1a;font-size:14px;">
+            <strong>24-hour cancellation policy.</strong> Please contact Nathan at least 24 hours before your lesson if you need to reschedule.
+          </p>
+        </div>
+        <div style="margin-top:16px;padding:14px 18px;background:#e8f4ec;border-radius:6px;border:1px solid #c8dece;">
+          <p style="margin:0 0 6px;color:#2d5a3d;font-size:14px;font-weight:600;">Contact Nathan</p>
+          <p style="margin:0;color:#2d5a3d;font-size:14px;">207-289-4970 &nbsp;|&nbsp; Nate@club72golfco.com</p>
+        </div>
+        <p style="margin:20px 0 0;font-size:13px;color:#999;text-align:center;">
+          Club 72 Golf Co. · 12 Sullivan St, Suite 121, Berwick ME 03901
+        </p>
+      </div>
+    </div>"""
+    send_email(d['email'], subject, html)
+
 
 HTML = '''<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -37,8 +135,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 .step-lbl { font-size: 12px; color: #7a7a6e; }
 .step-lbl.active { color: #1a3a2a; font-weight: 600; }
 .step-line { flex: 1; height: 1px; background: #e8e0cc; margin: 0 6px; }
-.panel { display: none; }
-.panel.active { display: block; }
+.panel { display: none; } .panel.active { display: block; }
 h2 { font-size: 20px; font-weight: 600; color: #1a3a2a; margin-bottom: 4px; }
 .sub { font-size: 14px; color: #7a7a6e; margin-bottom: 1.5rem; }
 .pkg-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-bottom: 1.5rem; }
@@ -84,8 +181,7 @@ textarea { height: 80px; resize: vertical; }
 .sum { background: #f8f3e8; border-radius: 10px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; border: 1px solid #e8e0cc; }
 .sr { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #e8e0cc; font-size: 13px; }
 .sr:last-child { border-bottom: none; font-weight: 700; font-size: 15px; }
-.sr span:first-child { color: #7a7a6e; }
-.sr span:last-child { color: #1a1a1a; }
+.sr span:first-child { color: #7a7a6e; } .sr span:last-child { color: #1a1a1a; }
 .btn-row { display: flex; gap: 10px; }
 .btn { padding: 11px 22px; border-radius: 8px; font-size: 14px; cursor: pointer; font-family: inherit; font-weight: 600; transition: all 0.15s; }
 .btn-p { background: #1a3a2a; color: #b8963e; border: none; flex: 1; }
@@ -101,18 +197,14 @@ textarea { height: 80px; resize: vertical; }
 .conf { background: #f8f3e8; border-radius: 10px; padding: 1rem 1.25rem; text-align: left; max-width: 380px; margin: 0 auto 1.5rem; border: 1px solid #e8e0cc; }
 .cr { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #e8e0cc; font-size: 13px; }
 .cr:last-child { border-bottom: none; }
-.cr span:first-child { color: #7a7a6e; }
-.cr span:last-child { color: #1a1a1a; font-weight: 600; }
+.cr span:first-child { color: #7a7a6e; } .cr span:last-child { color: #1a1a1a; font-weight: 600; }
 .contact-note { font-size: 13px; color: #7a7a6e; }
 .contact-note strong { color: #1a3a2a; }
 </style></head><body>
 <div class="wrap">
   <div class="brand">
     <div class="brand-dot">72</div>
-    <div>
-      <div class="brand-name">Club 72 Golf Co.</div>
-      <div class="brand-sub">Book a lesson with Nathan Ross</div>
-    </div>
+    <div><div class="brand-name">Club 72 Golf Co.</div><div class="brand-sub">Book a lesson with Nathan Ross</div></div>
   </div>
   <div class="step-bar" id="sb">
     <div class="step"><div class="step-num active" id="sn1">1</div><div class="step-lbl active" id="sl1">Package</div></div>
@@ -123,26 +215,22 @@ textarea { height: 80px; resize: vertical; }
     <div class="step-line"></div>
     <div class="step"><div class="step-num" id="sn4">4</div><div class="step-lbl" id="sl4">Confirm</div></div>
   </div>
-
   <div class="panel active" id="p1">
     <h2>Choose a package</h2>
     <p class="sub">All lessons at Club 72, Berwick ME or a local course of your choice.</p>
     <div class="pkg-grid">
       <div class="pkg-card" data-pkg="Introductory · 60 min" data-price="90" onclick="selPkg(this)">
-        <span class="pkg-badge">Single</span>
-        <div class="pkg-name">Introductory</div>
+        <span class="pkg-badge">Single</span><div class="pkg-name">Introductory</div>
         <div class="pkg-price">$90 <span>/ session</span></div>
         <div class="pkg-desc">Full swing evaluation with TrackMan analysis.</div>
       </div>
       <div class="pkg-card" data-pkg="Series of Five" data-price="400" onclick="selPkg(this)">
-        <span class="pkg-badge gold">Most popular</span>
-        <div class="pkg-name">Series of Five</div>
+        <span class="pkg-badge gold">Most popular</span><div class="pkg-name">Series of Five</div>
         <div class="pkg-price">$400 <span>/ 5 lessons</span></div>
         <div class="pkg-desc">Committed improvement. Save $50 vs individual.</div>
       </div>
       <div class="pkg-card" data-pkg="Monthly Retainer" data-price="320" onclick="selPkg(this)">
-        <span class="pkg-badge">Elite</span>
-        <div class="pkg-name">Monthly Retainer</div>
+        <span class="pkg-badge">Elite</span><div class="pkg-name">Monthly Retainer</div>
         <div class="pkg-price">$320 <span>/ month</span></div>
         <div class="pkg-desc">4 lessons/month with on-course playing lesson.</div>
       </div>
@@ -154,7 +242,6 @@ textarea { height: 80px; resize: vertical; }
     </div>
     <div class="btn-row"><button class="btn btn-p" id="btn1" onclick="go(2)" disabled>Continue to date &amp; time</button></div>
   </div>
-
   <div class="panel" id="p2">
     <h2>Pick a date and time</h2>
     <p class="sub">Mon–Fri 9am–6pm · Sat 11am–5pm · Sun by request</p>
@@ -174,7 +261,6 @@ textarea { height: 80px; resize: vertical; }
       <button class="btn btn-p" id="btn2" onclick="v2()" disabled>Continue to details</button>
     </div>
   </div>
-
   <div class="panel" id="p3">
     <h2>Your details</h2>
     <p class="sub">So Nathan can reach you to confirm your lesson.</p>
@@ -190,7 +276,7 @@ textarea { height: 80px; resize: vertical; }
       <div class="fg"><label>Skill level</label>
         <select id="sk">
           <option>Complete beginner</option><option>Casual player (100+ shots)</option>
-          <option>Intermediate (80–100)</option><option>Experienced (below 80)</option>
+          <option>Intermediate (80-100)</option><option>Experienced (below 80)</option>
           <option>Competitive / tournament player</option>
         </select>
       </div>
@@ -209,7 +295,6 @@ textarea { height: 80px; resize: vertical; }
       <button class="btn btn-p" id="btn3" onclick="v3()" disabled>Review &amp; confirm</button>
     </div>
   </div>
-
   <div class="panel" id="p4">
     <h2>Review your booking</h2>
     <p class="sub">Confirm the details below. Nathan will reach out within 24 hours.</p>
@@ -219,14 +304,13 @@ textarea { height: 80px; resize: vertical; }
       <button class="btn btn-p" onclick="submit()">Confirm booking</button>
     </div>
   </div>
-
   <div class="panel" id="p5">
     <div class="ok-wrap">
       <div class="ok-icon">&#10003;</div>
-      <div class="ok-title">Booking request sent!</div>
-      <p class="ok-sub">Nathan will reach out to <strong id="confEm"></strong> within 24 hours to confirm. See you on the course!</p>
+      <div class="ok-title">You\'re booked!</div>
+      <p class="ok-sub">A confirmation email has been sent to <strong id="confEm"></strong>.<br>Nathan will be in touch within 24 hours to confirm.</p>
       <div class="conf" id="confCard"></div>
-      <p class="contact-note">Questions? Call or text <strong>207-289-4970</strong> · <strong>Nate@club72golfco.com</strong></p>
+      <p class="contact-note">Questions? <strong>207-289-4970</strong> &nbsp;|&nbsp; <strong>Nate@club72golfco.com</strong></p>
     </div>
   </div>
 </div>
@@ -236,19 +320,19 @@ const DAYS=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 let S={pkg:null,price:null,date:null,dateLabel:null,time:null};
 let cY,cM;
 (function(){const n=new Date();cY=n.getFullYear();cM=n.getMonth();rCal();}());
-function selPkg(el){document.querySelectorAll('.pkg-card').forEach(c=>c.classList.remove('sel'));el.classList.add('sel');S.pkg=el.dataset.pkg;S.price=el.dataset.price;document.getElementById('btn1').disabled=false;}
-function go(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('p'+n).classList.add('active');updBar(n);}
-function updBar(n){for(let i=1;i<=4;i++){const num=document.getElementById('sn'+i),lbl=document.getElementById('sl'+i);if(i<n){num.className='step-num done';num.textContent='✓';lbl.className='step-lbl';}else if(i===n){num.className='step-num active';num.textContent=i;lbl.className='step-lbl active';}else{num.className='step-num';num.textContent=i;lbl.className='step-lbl';}}}
+function selPkg(el){document.querySelectorAll(".pkg-card").forEach(c=>c.classList.remove("sel"));el.classList.add("sel");S.pkg=el.dataset.pkg;S.price=el.dataset.price;document.getElementById("btn1").disabled=false;}
+function go(n){document.querySelectorAll(".panel").forEach(p=>p.classList.remove("active"));document.getElementById("p"+n).classList.add("active");updBar(n);}
+function updBar(n){for(let i=1;i<=4;i++){const num=document.getElementById("sn"+i),lbl=document.getElementById("sl"+i);if(i<n){num.className="step-num done";num.textContent="✓";lbl.className="step-lbl";}else if(i===n){num.className="step-num active";num.textContent=i;lbl.className="step-lbl active";}else{num.className="step-num";num.textContent=i;lbl.className="step-lbl";}}}
 function prevM(){cM--;if(cM<0){cM=11;cY--;}rCal();}
 function nextM(){cM++;if(cM>11){cM=0;cY++;}rCal();}
-function rCal(){document.getElementById('cMonth').textContent=MONTHS[cM]+' '+cY;const g=document.getElementById('cGrid');g.innerHTML='';DAYS.forEach(d=>{const e=document.createElement('div');e.className='cal-dlbl';e.textContent=d;g.appendChild(e);});const f=new Date(cY,cM,1).getDay(),days=new Date(cY,cM+1,0).getDate(),today=new Date();today.setHours(0,0,0,0);for(let i=0;i<f;i++){const e=document.createElement('div');e.className='cal-day empty';g.appendChild(e);}for(let d=1;d<=days;d++){const e=document.createElement('div');e.className='cal-day';e.textContent=d;const date=new Date(cY,cM,d);date.setHours(0,0,0,0);const dow=date.getDay();if(date<today){e.classList.add('past');}else if(dow===0){e.classList.add('na');}else{if(date.toDateString()===today.toDateString())e.classList.add('today');const key=cY+'-'+(cM+1)+'-'+d;if(S.date===key)e.classList.add('sel');e.addEventListener('click',()=>selDate(d,date,dow));}g.appendChild(e);}}
-function selDate(d,date,dow){S.date=cY+'-'+(cM+1)+'-'+d;S.dateLabel=MONTHS[cM]+' '+d+', '+cY;S.time=null;document.getElementById('btn2').disabled=true;rCal();rTimes(dow);document.getElementById('tSec').style.display='block';document.getElementById('tLabel').textContent='Available times — '+S.dateLabel;}
-function rTimes(dow){const g=document.getElementById('tGrid');g.innerHTML='';const slots=dow===6?['11:00 am','12:00 pm','1:00 pm','2:00 pm','3:00 pm','4:00 pm']:['9:00 am','10:00 am','11:00 am','12:00 pm','1:00 pm','2:00 pm','3:00 pm','4:00 pm','5:00 pm'];const taken=[slots[1],slots[3]];slots.forEach(s=>{const e=document.createElement('div');e.className='ts';e.textContent=s;if(taken.includes(s)){e.classList.add('tk');}else{e.addEventListener('click',()=>{document.querySelectorAll('.ts').forEach(x=>x.classList.remove('sel'));e.classList.add('sel');S.time=s;document.getElementById('btn2').disabled=false;});}g.appendChild(e);});}
-function v2(){if(!S.date||!S.time){document.getElementById('e2').style.display='block';return;}document.getElementById('e2').style.display='none';go(3);}
-function ck3(){const ok=document.getElementById('fn').value.trim()&&document.getElementById('ln').value.trim()&&document.getElementById('em').value.trim()&&document.getElementById('ph').value.trim()&&document.getElementById('tos').checked;document.getElementById('btn3').disabled=!ok;}
-function v3(){if(!document.getElementById('fn').value.trim()||!document.getElementById('ln').value.trim()||!document.getElementById('em').value.trim()||!document.getElementById('ph').value.trim()||!document.getElementById('tos').checked){document.getElementById('e3').style.display='block';return;}document.getElementById('e3').style.display='none';bldSum();go(4);}
-function bldSum(){const loc=document.getElementById('loc').value,name=document.getElementById('fn').value+' '+document.getElementById('ln').value,em=document.getElementById('em').value,ph=document.getElementById('ph').value,sk=document.getElementById('sk').value;document.getElementById('sumCard').innerHTML=`<div class="sr"><span>Package</span><span>${S.pkg}</span></div><div class="sr"><span>Date</span><span>${S.dateLabel}</span></div><div class="sr"><span>Time</span><span>${S.time}</span></div><div class="sr"><span>Location</span><span>${loc}</span></div><div class="sr"><span>Name</span><span>${name}</span></div><div class="sr"><span>Email</span><span>${em}</span></div><div class="sr"><span>Phone</span><span>${ph}</span></div><div class="sr"><span>Skill level</span><span>${sk}</span></div><div class="sr"><span>Total due</span><span>$${S.price}</span></div>`;}
-async function submit(){const data={name:document.getElementById('fn').value+' '+document.getElementById('ln').value,email:document.getElementById('em').value,phone:document.getElementById('ph').value,package:S.pkg,price:S.price,date:S.dateLabel,time:S.time,location:document.getElementById('loc').value,skill:document.getElementById('sk').value,notes:document.getElementById('nt').value};try{const r=await fetch('/book',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const j=await r.json();if(j.ok){document.getElementById('confEm').textContent=data.email;document.getElementById('confCard').innerHTML=`<div class="cr"><span>Name</span><span>${data.name}</span></div><div class="cr"><span>Package</span><span>${data.package}</span></div><div class="cr"><span>Date & time</span><span>${data.date} at ${data.time}</span></div><div class="cr"><span>Location</span><span>${data.location}</span></div><div class="cr"><span>Total</span><span>$${data.price}</span></div>`;document.getElementById('sb').style.display='none';go(5);}else{alert('Something went wrong. Please try again.');}}catch(err){go(5);document.getElementById('confEm').textContent=data.email;document.getElementById('confCard').innerHTML=`<div class="cr"><span>Name</span><span>${data.name}</span></div><div class="cr"><span>Package</span><span>${data.package}</span></div><div class="cr"><span>Date & time</span><span>${data.date} at ${data.time}</span></div><div class="cr"><span>Total</span><span>$${data.price}</span></div>`;document.getElementById('sb').style.display='none';}}
+function rCal(){document.getElementById("cMonth").textContent=MONTHS[cM]+" "+cY;const g=document.getElementById("cGrid");g.innerHTML="";DAYS.forEach(d=>{const e=document.createElement("div");e.className="cal-dlbl";e.textContent=d;g.appendChild(e);});const f=new Date(cY,cM,1).getDay(),days=new Date(cY,cM+1,0).getDate(),today=new Date();today.setHours(0,0,0,0);for(let i=0;i<f;i++){const e=document.createElement("div");e.className="cal-day empty";g.appendChild(e);}for(let d=1;d<=days;d++){const e=document.createElement("div");e.className="cal-day";e.textContent=d;const date=new Date(cY,cM,d);date.setHours(0,0,0,0);const dow=date.getDay();if(date<today){e.classList.add("past");}else if(dow===0){e.classList.add("na");}else{if(date.toDateString()===today.toDateString())e.classList.add("today");const key=cY+"-"+(cM+1)+"-"+d;if(S.date===key)e.classList.add("sel");e.addEventListener("click",()=>selDate(d,date,dow));}g.appendChild(e);}}
+function selDate(d,date,dow){S.date=cY+"-"+(cM+1)+"-"+d;S.dateLabel=MONTHS[cM]+" "+d+", "+cY;S.time=null;document.getElementById("btn2").disabled=true;rCal();rTimes(dow);document.getElementById("tSec").style.display="block";document.getElementById("tLabel").textContent="Available times — "+S.dateLabel;}
+function rTimes(dow){const g=document.getElementById("tGrid");g.innerHTML="";const slots=dow===6?["11:00 am","12:00 pm","1:00 pm","2:00 pm","3:00 pm","4:00 pm"]:["9:00 am","10:00 am","11:00 am","12:00 pm","1:00 pm","2:00 pm","3:00 pm","4:00 pm","5:00 pm"];const taken=[slots[1],slots[3]];slots.forEach(s=>{const e=document.createElement("div");e.className="ts";e.textContent=s;if(taken.includes(s)){e.classList.add("tk");}else{e.addEventListener("click",()=>{document.querySelectorAll(".ts").forEach(x=>x.classList.remove("sel"));e.classList.add("sel");S.time=s;document.getElementById("btn2").disabled=false;});}g.appendChild(e);});}
+function v2(){if(!S.date||!S.time){document.getElementById("e2").style.display="block";return;}document.getElementById("e2").style.display="none";go(3);}
+function ck3(){const ok=document.getElementById("fn").value.trim()&&document.getElementById("ln").value.trim()&&document.getElementById("em").value.trim()&&document.getElementById("ph").value.trim()&&document.getElementById("tos").checked;document.getElementById("btn3").disabled=!ok;}
+function v3(){if(!document.getElementById("fn").value.trim()||!document.getElementById("ln").value.trim()||!document.getElementById("em").value.trim()||!document.getElementById("ph").value.trim()||!document.getElementById("tos").checked){document.getElementById("e3").style.display="block";return;}document.getElementById("e3").style.display="none";bldSum();go(4);}
+function bldSum(){const loc=document.getElementById("loc").value,name=document.getElementById("fn").value+" "+document.getElementById("ln").value,em=document.getElementById("em").value,ph=document.getElementById("ph").value,sk=document.getElementById("sk").value;document.getElementById("sumCard").innerHTML=`<div class="sr"><span>Package</span><span>${S.pkg}</span></div><div class="sr"><span>Date</span><span>${S.dateLabel}</span></div><div class="sr"><span>Time</span><span>${S.time}</span></div><div class="sr"><span>Location</span><span>${loc}</span></div><div class="sr"><span>Name</span><span>${name}</span></div><div class="sr"><span>Email</span><span>${em}</span></div><div class="sr"><span>Phone</span><span>${ph}</span></div><div class="sr"><span>Skill level</span><span>${sk}</span></div><div class="sr"><span>Total due</span><span>$${S.price}</span></div>`;}
+async function submit(){const data={name:document.getElementById("fn").value+" "+document.getElementById("ln").value,email:document.getElementById("em").value,phone:document.getElementById("ph").value,package:S.pkg,price:S.price,date:S.dateLabel,time:S.time,location:document.getElementById("loc").value,skill:document.getElementById("sk").value,notes:document.getElementById("nt").value};try{const r=await fetch("/book",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});const j=await r.json();if(j.ok){document.getElementById("confEm").textContent=data.email;document.getElementById("confCard").innerHTML=`<div class="cr"><span>Package</span><span>${data.package}</span></div><div class="cr"><span>Date & time</span><span>${data.date} at ${data.time}</span></div><div class="cr"><span>Location</span><span>${data.location}</span></div><div class="cr"><span>Total</span><span>$${data.price}</span></div>`;document.getElementById("sb").style.display="none";go(5);}}catch(err){console.error(err);}}
 </script></body></html>'''
 
 @app.route('/')
@@ -265,26 +349,27 @@ def book():
          d.get('price'), d.get('date'), d.get('time'), d.get('location'),
          d.get('skill'), d.get('notes'), datetime.datetime.now().isoformat()))
     conn.commit()
-    bids = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+    bid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
     conn.close()
-    print(f"\n📅 NEW BOOKING #{bids}")
-    print(f"   Name: {d.get('name')} | {d.get('email')} | {d.get('phone')}")
-    print(f"   Package: {d.get('package')} (${d.get('price')})")
-    print(f"   Date: {d.get('date')} at {d.get('time')}")
-    print(f"   Location: {d.get('location')}")
-    return jsonify({"ok": True, "id": bids})
+    print(f"NEW BOOKING #{bid} — {d.get('name')} | {d.get('package')} | {d.get('date')} {d.get('time')}")
+    notify_nathan(d, bid)
+    confirm_student(d, bid)
+    return jsonify({"ok": True, "id": bid})
 
 @app.route('/bookings')
 def bookings():
     conn = sqlite3.connect(DB)
     rows = conn.execute('SELECT * FROM bookings ORDER BY created_at DESC').fetchall()
     conn.close()
-    out = "<h2 style='font-family:sans-serif;padding:1rem'>Bookings</h2><table border=1 cellpadding=8 style='font-family:sans-serif;font-size:13px;border-collapse:collapse'><tr><th>#</th><th>Name</th><th>Email</th><th>Phone</th><th>Package</th><th>Price</th><th>Date</th><th>Time</th><th>Location</th><th>Skill</th><th>Notes</th><th>Created</th></tr>"
+    out = "<html><head><style>body{font-family:Arial,sans-serif;padding:2rem;background:#f5f0e8;}h2{color:#1a3a2a;margin-bottom:1rem;}table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 8px rgba(0,0,0,0.08);}th{background:#1a3a2a;color:#b8963e;padding:10px 14px;text-align:left;font-size:13px;}td{padding:10px 14px;font-size:13px;border-bottom:1px solid #f0e8d8;}tr:last-child td{border-bottom:none;}tr:hover td{background:#fdf8f0;}</style></head><body>"
+    out += f"<h2>Club 72 Bookings ({len(rows)} total)</h2>"
+    out += "<table><tr><th>#</th><th>Name</th><th>Email</th><th>Phone</th><th>Package</th><th>Price</th><th>Date</th><th>Time</th><th>Location</th><th>Skill</th><th>Notes</th><th>Booked At</th></tr>"
     for r in rows:
-        out += f"<tr>{''.join(f'<td>{x or ''}</td>' for x in r)}</tr>"
-    out += "</table>"
+        out += f"<tr>{''.join(f'<td>{x or chr(8212)}</td>' for x in r)}</tr>"
+    out += "</table></body></html>"
     return out
 
 if __name__ == '__main__':
-    print("Starting Club 72 Booking Server on http://localhost:5000")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    port = int(os.environ.get('PORT', 5000))
+    print(f"Starting Club 72 Booking Server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
