@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, render_template_string
 import sqlite3, json, datetime, os
 
 app = Flask(__name__)
-DB = '/home/claude/bookings.db'
+DB = os.environ.get('DB_PATH', '/tmp/bookings.db')
 
 def init_db():
     conn = sqlite3.connect(DB)
